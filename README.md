@@ -6,9 +6,9 @@
 
 Fast summaries from URLs, files, and media. Works in the terminal, a Chrome Side Panel and Firefox Sidebar.
 
-**0.11.0 preview (unreleased):** this README reflects the upcoming release.
+**0.12.0 preview (unreleased):** this README reflects the upcoming release.
 
-## 0.11.0 preview highlights (most interesting first)
+## 0.12.0 preview highlights (most interesting first)
 
 - Chrome Side Panel **chat** (streaming agent + history) inside the sidebar.
 - **YouTube slides**: screenshots + OCR + transcript cards, timestamped seek, OCR/Transcript toggle.
