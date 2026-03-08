@@ -40,6 +40,14 @@ import {
   mountSummarizeControl,
 } from "./pickers";
 import { createSlideImageLoader, normalizeSlideImageUrl } from "./slide-images";
+import {
+  normalizePanelUrl,
+  panelUrlsMatch,
+  resolvePanelNavigationDecision,
+  shouldAcceptRunForCurrentPage,
+  shouldAcceptSlidesForCurrentPage,
+  shouldInvalidateCurrentSource,
+} from "./session-policy";
 import { chooseSlideDescription, sanitizeSlideSummaryTitle } from "./slide-text-policy";
 import { createSlidesHydrator } from "./slides-hydrator";
 import { hasResolvedSlidesPayload } from "./slides-pending";
@@ -319,6 +327,7 @@ let slidesSummaryHadError = false;
 let slidesSummaryComplete = false;
 let slidesSummaryModel: string | null = null;
 let pendingRunForPlannedSlides: RunStart | null = null;
+const pendingSummaryRunsByUrl = new Map<string, RunStart>();
 const pendingSlidesRunsByUrl = new Map<string, { runId: string; url: string }>();
 
 const AGENT_NAV_TTL_MS = 20_000;
@@ -390,9 +399,20 @@ function resolveActiveSlidesRunId(): string | null {
   return null;
 }
 
+function maybeStartPendingSummaryRunForUrl(url: string | null) {
+  if (!url) return false;
+  const key = normalizePanelUrl(url);
+  const pending = pendingSummaryRunsByUrl.get(key);
+  if (!pending) return false;
+  if (streamController.isStreaming()) return false;
+  pendingSummaryRunsByUrl.delete(key);
+  attachSummaryRun(pending);
+  return true;
+}
+
 function maybeStartPendingSlidesForUrl(url: string | null) {
   if (!url) return;
-  const key = normalizeUrl(url);
+  const key = normalizePanelUrl(url);
   const pending = pendingSlidesRunsByUrl.get(key);
   if (!pending) return;
   if (!slidesEnabledValue) return;
@@ -403,6 +423,46 @@ function maybeStartPendingSlidesForUrl(url: string | null) {
   pendingSlidesRunsByUrl.delete(key);
   startSlidesStreamForRunId(pending.runId);
   startSlidesSummaryStreamForRunId(pending.runId, pending.url);
+}
+
+function attachSummaryRun(run: RunStart) {
+  stopSlidesStream();
+  setPhase("connecting");
+  lastAction = "summarize";
+  window.clearTimeout(autoKickTimer);
+  if (panelState.chatStreaming) {
+    finishStreamingMessage();
+  }
+  const preserveChat = shouldPreserveChatForRun(run.url);
+  if (!preserveChat) {
+    void clearChatHistoryForActiveTab();
+    resetChatState();
+  } else {
+    preserveChatOnNextReset = true;
+  }
+  setActiveMetricsMode("summary");
+  panelState.runId = run.id;
+  panelState.slidesRunId = slidesParallelValue ? null : run.id;
+  panelState.currentSource = { url: run.url, title: run.title };
+  currentRunTabId = activeTabId;
+  headerController.setBaseTitle(run.title || run.url || "Summarize");
+  headerController.setBaseSubtitle("");
+  {
+    const fallbackModel = panelState.ui?.settings.model ?? null;
+    panelState.lastMeta = {
+      inputSummary: null,
+      model: fallbackModel,
+      modelLabel: fallbackModel,
+    };
+  }
+  pendingRunForPlannedSlides = run;
+  if (!panelState.summaryMarkdown?.trim()) {
+    renderMarkdownDisplay();
+  }
+  if (!slidesParallelValue) {
+    startSlidesStream(run);
+  }
+  void streamController.start(run);
 }
 
 async function fetchSlideTools(requireOcr: boolean): Promise<{
@@ -924,29 +984,6 @@ updateChatDockHeight();
 const chatDockObserver = new ResizeObserver(() => updateChatDockHeight());
 chatDockObserver.observe(chatDockEl);
 
-function normalizeUrl(value: string) {
-  try {
-    const url = new URL(value);
-    url.hash = "";
-    return url.toString();
-  } catch {
-    return value;
-  }
-}
-
-function urlsMatch(a: string, b: string) {
-  const left = normalizeUrl(a);
-  const right = normalizeUrl(b);
-  if (left === right) return true;
-  const boundaryMatch = (longer: string, shorter: string) => {
-    if (!longer.startsWith(shorter)) return false;
-    if (longer.length === shorter.length) return true;
-    const next = longer[shorter.length];
-    return next === "/" || next === "?" || next === "&";
-  };
-  return boundaryMatch(left, right) || boundaryMatch(right, left);
-}
-
 function markAgentNavigationIntent(url: string | null | undefined) {
   const trimmed = typeof url === "string" ? url.trim() : "";
   if (!trimmed) return;
@@ -975,7 +1012,7 @@ function isRecentAgentNavigation(tabId: number | null, url: string | null) {
   if (tabId != null && lastAgentNavigation.tabId != null && tabId === lastAgentNavigation.tabId) {
     return true;
   }
-  if (url && lastAgentNavigation.url && urlsMatch(url, lastAgentNavigation.url)) {
+  if (url && lastAgentNavigation.url && panelUrlsMatch(url, lastAgentNavigation.url)) {
     return true;
   }
   return false;
@@ -988,7 +1025,7 @@ function notePreserveChatForUrl(url: string | null) {
 
 function shouldPreserveChatForRun(url: string) {
   const pending = pendingPreserveChatForUrl;
-  if (pending && Date.now() - pending.at < AGENT_NAV_TTL_MS && urlsMatch(url, pending.url)) {
+  if (pending && Date.now() - pending.at < AGENT_NAV_TTL_MS && panelUrlsMatch(url, pending.url)) {
     pendingPreserveChatForUrl = null;
     return true;
   }
@@ -1052,7 +1089,7 @@ async function syncWithActiveTab() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.url || !canSyncTabUrl(tab.url)) return;
-    if (!urlsMatch(tab.url, panelState.currentSource.url)) {
+    if (!panelUrlsMatch(tab.url, panelState.currentSource.url)) {
       const preserveChat = isRecentAgentNavigation(tab.id ?? null, tab.url);
       if (preserveChat) {
         notePreserveChatForUrl(tab.url);
@@ -1766,6 +1803,8 @@ const slidesTestHooks = (
       getSlidesState?: () => { slidesCount: number; layout: SlidesLayout; hasSlides: boolean };
       renderSlidesNow?: () => void;
       applyUiState?: (state: UiState) => void;
+      applyBgMessage?: (message: BgToPanel) => void;
+      applySummarySnapshot?: (payload: { run: RunStart; markdown: string }) => void;
       forceRenderSlides?: () => void;
       showInlineError?: (message: string) => void;
       isInlineErrorVisible?: () => boolean;
@@ -1808,6 +1847,20 @@ if (slidesTestHooks) {
   slidesTestHooks.applyUiState = (state) => {
     panelState.ui = state;
     updateControls(state);
+  };
+  slidesTestHooks.applyBgMessage = (message) => {
+    handleBgMessage(message);
+  };
+  slidesTestHooks.applySummarySnapshot = (payload) => {
+    resetSummaryView({ preserveChat: false, clearRunId: false, stopSlides: false });
+    panelState.runId = payload.run.id;
+    panelState.slidesRunId = slidesParallelValue ? null : payload.run.id;
+    panelState.currentSource = { url: payload.run.url, title: payload.run.title };
+    currentRunTabId = activeTabId;
+    headerController.setBaseTitle(payload.run.title || payload.run.url || "Summarize");
+    headerController.setBaseSubtitle("");
+    renderMarkdown(payload.markdown);
+    setPhase("idle");
   };
   slidesTestHooks.forceRenderSlides = () => {
     slidesEnabledValue = true;
@@ -3017,7 +3070,7 @@ function startSlidesStream(run: RunStart) {
 function applySlidesSummaryMarkdown(markdown: string) {
   if (!markdown.trim()) return;
   const currentUrl = panelState.currentSource?.url ?? activeTabUrl ?? null;
-  if (slidesSummaryUrl && currentUrl && !urlsMatch(slidesSummaryUrl, currentUrl)) return;
+  if (slidesSummaryUrl && currentUrl && !panelUrlsMatch(slidesSummaryUrl, currentUrl)) return;
   if (!slidesEnabledValue) {
     slidesSummaryPending = markdown;
     return;
@@ -3539,93 +3592,102 @@ function updateControls(state: UiState) {
   const nextTabId = state.tab.id ?? null;
   const nextTabUrl = state.tab.url ?? null;
   const preferUrlMode = nextTabUrl ? shouldPreferUrlMode(nextTabUrl) : false;
-  const tabChanged = nextTabId !== activeTabId;
-  const urlChanged =
-    !tabChanged && nextTabUrl && (!activeTabUrl || !urlsMatch(nextTabUrl, activeTabUrl));
   const hasActiveChat =
     panelState.chatStreaming || chatQueue.length > 0 || chatController.getMessages().length > 0;
   const hasMediaInfo = state.media != null;
   const mediaFromState = Boolean(state.media && (state.media.hasVideo || state.media.hasAudio));
+  const preserveChatForTab =
+    (activeTabId === null && nextTabId !== null && hasActiveChat) ||
+    isRecentAgentNavigation(nextTabId, nextTabUrl);
+  const preserveChatForUrl =
+    (activeTabUrl === null && nextTabUrl !== null && hasActiveChat) ||
+    isRecentAgentNavigation(activeTabId, nextTabUrl);
+  const navigation = resolvePanelNavigationDecision({
+    activeTabId,
+    activeTabUrl,
+    nextTabId,
+    nextTabUrl,
+    hasActiveChat,
+    chatEnabled: chatEnabledValue,
+    preserveChat: nextTabId !== activeTabId ? preserveChatForTab : preserveChatForUrl,
+    preferUrlMode,
+    inputModeOverride,
+  });
   const nextMediaAvailable = hasMediaInfo
     ? mediaFromState || preferUrlMode
-    : tabChanged || urlChanged
+    : navigation.kind !== "none"
       ? preferUrlMode
       : mediaAvailable || preferUrlMode;
   const nextVideoLabel = state.media?.hasAudio && !state.media.hasVideo ? "Audio" : "Video";
 
-  if (tabChanged) {
-    const initialTabHydration = activeTabId === null && nextTabId !== null && hasActiveChat;
-    const preserveChat = initialTabHydration || isRecentAgentNavigation(nextTabId, nextTabUrl);
-    if (preserveChat) {
+  if (navigation.kind === "tab") {
+    if (navigation.preserveChat) {
       notePreserveChatForUrl(nextTabUrl ?? lastAgentNavigation?.url ?? null);
     }
     const previousTabId = activeTabId;
     activeTabId = nextTabId;
     activeTabUrl = nextTabUrl;
-    if (panelState.chatStreaming && !preserveChat) {
+    if (panelState.chatStreaming && navigation.shouldAbortChatStream) {
       requestAgentAbort("Tab changed");
     }
-    if (!preserveChat) {
+    if (navigation.shouldClearChat) {
       void clearChatHistoryForActiveTab();
       resetChatState();
-    } else {
+    } else if (navigation.shouldMigrateChat) {
       void migrateChatHistory(previousTabId, nextTabId);
     }
-    inputMode = preferUrlMode ? "video" : "page";
-    inputModeOverride = null;
+    if (navigation.nextInputMode) {
+      inputMode = navigation.nextInputMode;
+    }
+    if (navigation.resetInputModeOverride) {
+      inputModeOverride = null;
+    }
     if (nextTabId && nextTabUrl) {
-      const cached = panelCacheController.resolve(nextTabId, nextTabUrl);
-      if (cached) {
-        applyPanelCache(cached, { preserveChat });
-      } else {
-        panelState.currentSource = null;
-        currentRunTabId = null;
-        resetSummaryView({ preserveChat });
-        panelCacheController.request(nextTabId, nextTabUrl, preserveChat);
+      if (!maybeStartPendingSummaryRunForUrl(nextTabUrl)) {
+        const cached = panelCacheController.resolve(nextTabId, nextTabUrl);
+        if (cached) {
+          applyPanelCache(cached, { preserveChat: navigation.preserveChat });
+        } else {
+          panelState.currentSource = null;
+          currentRunTabId = null;
+          resetSummaryView({ preserveChat: navigation.preserveChat });
+          panelCacheController.request(nextTabId, nextTabUrl, navigation.preserveChat);
+        }
       }
     } else {
       panelState.currentSource = null;
       currentRunTabId = null;
-      resetSummaryView({ preserveChat });
+      resetSummaryView({ preserveChat: navigation.preserveChat });
     }
-  } else if (urlChanged) {
-    const previousTabUrl = activeTabUrl;
+  } else if (navigation.kind === "url") {
     activeTabUrl = nextTabUrl;
-    const initialUrlHydration = previousTabUrl === null && nextTabUrl !== null && hasActiveChat;
-    const preserveChat = initialUrlHydration || isRecentAgentNavigation(activeTabId, nextTabUrl);
-    if (preserveChat) {
+    if (navigation.preserveChat) {
       notePreserveChatForUrl(nextTabUrl);
-    } else if (
-      chatEnabledValue &&
-      (panelState.chatStreaming || chatController.getMessages().length > 0)
-    ) {
+    } else if (navigation.shouldClearChat) {
       void clearChatHistoryForActiveTab();
       resetChatState();
     }
     if (activeTabId && nextTabUrl) {
-      const cached = panelCacheController.resolve(activeTabId, nextTabUrl);
-      if (cached) {
-        applyPanelCache(cached, { preserveChat });
-      } else {
-        panelState.currentSource = null;
-        currentRunTabId = null;
-        resetSummaryView({ preserveChat });
-        panelCacheController.request(activeTabId, nextTabUrl, preserveChat);
+      if (!maybeStartPendingSummaryRunForUrl(nextTabUrl)) {
+        const cached = panelCacheController.resolve(activeTabId, nextTabUrl);
+        if (cached) {
+          applyPanelCache(cached, { preserveChat: navigation.preserveChat });
+        } else {
+          panelState.currentSource = null;
+          currentRunTabId = null;
+          resetSummaryView({ preserveChat: navigation.preserveChat });
+          panelCacheController.request(activeTabId, nextTabUrl, navigation.preserveChat);
+        }
       }
     } else {
       panelState.currentSource = null;
       currentRunTabId = null;
-      resetSummaryView({ preserveChat });
+      resetSummaryView({ preserveChat: navigation.preserveChat });
     }
-    if (!inputModeOverride) {
-      inputMode = preferUrlMode ? "video" : "page";
-      inputModeOverride = null;
+    if (navigation.nextInputMode) {
+      inputMode = navigation.nextInputMode;
     }
-    if (
-      chatEnabledValue &&
-      nextTabUrl &&
-      (panelState.chatStreaming || chatController.getMessages().length > 0)
-    ) {
+    if (navigation.shouldAppendNavigationMessage && nextTabUrl) {
       void appendNavigationMessage(nextTabUrl, state.tab.title ?? null);
     }
   }
@@ -3668,6 +3730,7 @@ function updateControls(state: UiState) {
   if (!slidesEnabledValue) hideSlideNotice();
   if (slidesEnabledValue && (inputModeOverride ?? inputMode) === "video") {
     maybeApplyPendingSlidesSummary();
+    maybeStartPendingSummaryRunForUrl(nextTabUrl ?? null);
     maybeStartPendingSlidesForUrl(nextTabUrl ?? null);
   }
   applyChatEnabled();
@@ -3699,7 +3762,12 @@ function updateControls(state: UiState) {
   updateModelRowUI();
   modelRefreshBtn.disabled = !state.settings.tokenPresent || refreshFreeRunning;
   if (panelState.currentSource) {
-    if (state.tab.url && !urlsMatch(state.tab.url, panelState.currentSource.url)) {
+    if (
+      shouldInvalidateCurrentSource({
+        stateTabUrl: state.tab.url,
+        currentSourceUrl: panelState.currentSource.url,
+      })
+    ) {
       const preserveChat = isRecentAgentNavigation(activeTabId, state.tab.url);
       if (preserveChat) {
         notePreserveChatForUrl(state.tab.url);
@@ -3771,9 +3839,14 @@ function handleBgMessage(msg: BgToPanel) {
       }
       if (!msg.runId) return;
       const targetUrl = msg.url ?? null;
-      const currentUrl = panelState.currentSource?.url ?? activeTabUrl ?? null;
-      if (targetUrl && currentUrl && !urlsMatch(targetUrl, currentUrl)) {
-        pendingSlidesRunsByUrl.set(normalizeUrl(targetUrl), { runId: msg.runId, url: targetUrl });
+      if (
+        !shouldAcceptSlidesForCurrentPage({
+          targetUrl,
+          activeTabUrl,
+          currentSourceUrl: panelState.currentSource?.url ?? null,
+        })
+      ) {
+        pendingSlidesRunsByUrl.set(normalizePanelUrl(targetUrl), { runId: msg.runId, url: targetUrl });
         return;
       }
       startSlidesStreamForRunId(msg.runId);
@@ -3812,41 +3885,17 @@ function handleBgMessage(msg: BgToPanel) {
       return;
     }
     case "run:start": {
-      stopSlidesStream();
-      setPhase("connecting");
-      lastAction = "summarize";
-      window.clearTimeout(autoKickTimer);
-      if (panelState.chatStreaming) {
-        finishStreamingMessage();
+      if (
+        !shouldAcceptRunForCurrentPage({
+          runUrl: msg.run.url,
+          activeTabUrl,
+          currentSourceUrl: panelState.currentSource?.url ?? null,
+        })
+      ) {
+        pendingSummaryRunsByUrl.set(normalizePanelUrl(msg.run.url), msg.run);
+        return;
       }
-      const preserveChat = shouldPreserveChatForRun(msg.run.url);
-      if (!preserveChat) {
-        void clearChatHistoryForActiveTab();
-        resetChatState();
-      } else {
-        preserveChatOnNextReset = true;
-      }
-      setActiveMetricsMode("summary");
-      panelState.runId = msg.run.id;
-      panelState.slidesRunId = slidesParallelValue ? null : msg.run.id;
-      panelState.currentSource = { url: msg.run.url, title: msg.run.title };
-      currentRunTabId = activeTabId;
-      {
-        const fallbackModel = panelState.ui?.settings.model ?? null;
-        panelState.lastMeta = {
-          inputSummary: null,
-          model: fallbackModel,
-          modelLabel: fallbackModel,
-        };
-      }
-      pendingRunForPlannedSlides = msg.run;
-      if (!panelState.summaryMarkdown?.trim()) {
-        renderMarkdownDisplay();
-      }
-      if (!slidesParallelValue) {
-        startSlidesStream(msg.run);
-      }
-      void streamController.start(msg.run);
+      attachSummaryRun(msg.run);
       return;
     }
     case "chat:history":

@@ -14,6 +14,7 @@
 - Agents: expand model auto-resolution errors with checked models, missing env/CLI setup, and daemon restart guidance (#107).
 - Daemon: support multiple saved extension tokens, migrate legacy single-token configs, and accept any configured token for auth (#116).
 - Chrome extension: harden side-panel slides so SSE keepalives no longer false-time out, seeded placeholders no longer block pending/cached slide runs, retries can start a fresh summarize+slides run, and reruns replace stale slide state.
+- Chrome extension: refactor side-panel navigation/run attachment policy so late summary/slide runs no longer attach to the wrong page after tab or URL switches, and expand headless regression coverage for pending-run resume and slide-mode transitions.
 - Transcription: add Gemini audio/video transcription support across direct media, podcast/RSS, and yt-dlp YouTube fallback, including Files API uploads for larger media plus new Gemini live coverage (#89).
 - npm packaging: publish CLI with `pnpm publish` so `@steipete/summarize-core` is version-pinned in published metadata (no `workspace:*` in registry package).
 - Slides: detect WezTerm as an iTerm-compatible terminal for inline slide images in `--slides` mode. (#133) — thanks @doodaaatimmy-creator.
