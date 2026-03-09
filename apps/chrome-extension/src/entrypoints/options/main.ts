@@ -1,6 +1,8 @@
 import { defaultSettings, loadSettings, saveSettings } from "../../lib/settings";
 import { applyTheme, type ColorMode, type ColorScheme } from "../../lib/theme";
 import { bindOptionsInputs } from "./bindings";
+import { createBooleanSettingsRuntime } from "./boolean-settings";
+import { languagePresets, optionsTabStorageKey } from "./constants";
 import { createDaemonStatusChecker } from "./daemon-status";
 import { getOptionsElements } from "./elements";
 import { applyLoadedOptionsSettings, buildSavedOptionsSettings } from "./form-state";
@@ -17,7 +19,6 @@ import {
   createStatusController,
 } from "./support";
 import { createOptionsTabs } from "./tab-controller";
-import { createBooleanToggleController } from "./toggles";
 
 declare const __SUMMARIZE_GIT_HASH__: string;
 declare const __SUMMARIZE_VERSION__: string;
@@ -93,18 +94,6 @@ const {
   logsLevelInputs,
 } = getOptionsElements();
 
-const tabStorageKey = "summarize:options-tab";
-
-let autoValue = defaultSettings.autoSummarize;
-let chatEnabledValue = defaultSettings.chatEnabled;
-let automationEnabledValue = defaultSettings.automationEnabled;
-let hoverSummariesValue = defaultSettings.hoverSummaries;
-let summaryTimestampsValue = defaultSettings.summaryTimestamps;
-let slidesParallelValue = defaultSettings.slidesParallel;
-let slidesOcrEnabledValue = defaultSettings.slidesOcrEnabled;
-let extendedLoggingValue = defaultSettings.extendedLogging;
-let autoCliFallbackValue = defaultSettings.autoCliFallback;
-
 let isInitializing = true;
 
 const logsViewer = createLogsViewer({
@@ -146,7 +135,7 @@ const { resolveActiveTab } = createOptionsTabs({
   root: tabsRoot,
   buttons: tabButtons,
   panels: tabPanels,
-  storageKey: tabStorageKey,
+  storageKey: optionsTabStorageKey,
   onLogsActiveChange: (active) => {
     if (active) {
       logsViewer.handleTabActivated();
@@ -164,19 +153,7 @@ const { resolveActiveTab } = createOptionsTabs({
 });
 
 const { setStatus, flashStatus } = createStatusController(statusEl);
-
-const skillsController = createSkillsController({
-  elements: {
-    searchEl: skillsSearchEl,
-    listEl: skillsListEl,
-    emptyEl: skillsEmptyEl,
-    conflictsEl: skillsConflictsEl,
-    exportBtn: skillsExportBtn,
-    importBtn: skillsImportBtn,
-  },
-  setStatus,
-  flashStatus,
-});
+let booleanSettings: ReturnType<typeof createBooleanSettingsRuntime> | null = null;
 const settingsElements = {
   tokenEl,
   languagePresetEl,
@@ -210,22 +187,54 @@ const { saveNow, scheduleAutoSave } = createOptionsSaveRuntime({
         defaults: defaultSettings,
         elements: settingsElements,
         modelPresets,
-        booleans: {
-          autoSummarize: autoValue,
-          hoverSummaries: hoverSummariesValue,
-          chatEnabled: chatEnabledValue,
-          automationEnabled: automationEnabledValue,
-          slidesParallel: slidesParallelValue,
-          slidesOcrEnabled: slidesOcrEnabledValue,
-          summaryTimestamps: summaryTimestampsValue,
-          extendedLogging: extendedLoggingValue,
-          autoCliFallback: autoCliFallbackValue,
+        booleans: booleanSettings?.getState() ?? {
+          autoSummarize: defaultSettings.autoSummarize,
+          chatEnabled: defaultSettings.chatEnabled,
+          automationEnabled: defaultSettings.automationEnabled,
+          hoverSummaries: defaultSettings.hoverSummaries,
+          summaryTimestamps: defaultSettings.summaryTimestamps,
+          slidesParallel: defaultSettings.slidesParallel,
+          slidesOcrEnabled: defaultSettings.slidesOcrEnabled,
+          extendedLogging: defaultSettings.extendedLogging,
+          autoCliFallback: defaultSettings.autoCliFallback,
         },
         currentScheme,
         currentMode,
       }),
     );
   },
+});
+
+booleanSettings = createBooleanSettingsRuntime({
+  defaults: defaultSettings,
+  roots: {
+    autoToggleRoot,
+    chatToggleRoot,
+    automationToggleRoot,
+    hoverSummariesToggleRoot,
+    summaryTimestampsToggleRoot,
+    slidesParallelToggleRoot,
+    slidesOcrToggleRoot,
+    extendedLoggingToggleRoot,
+    autoCliFallbackToggleRoot,
+  },
+  scheduleAutoSave,
+  onAutomationChanged: () => {
+    void automationPermissions.updateUi();
+  },
+});
+
+const skillsController = createSkillsController({
+  elements: {
+    searchEl: skillsSearchEl,
+    listEl: skillsListEl,
+    emptyEl: skillsEmptyEl,
+    conflictsEl: skillsConflictsEl,
+    exportBtn: skillsExportBtn,
+    importBtn: skillsImportBtn,
+  },
+  setStatus,
+  flashStatus,
 });
 
 const resolveExtensionVersion = () => {
@@ -244,32 +253,6 @@ const modelPresets = createModelPresetsController({
   customEl: modelCustomEl,
   defaultValue: defaultSettings.model,
 });
-
-const languagePresets = [
-  "auto",
-  "en",
-  "de",
-  "es",
-  "fr",
-  "it",
-  "pt",
-  "nl",
-  "sv",
-  "no",
-  "da",
-  "fi",
-  "pl",
-  "cs",
-  "tr",
-  "ru",
-  "uk",
-  "ar",
-  "hi",
-  "ja",
-  "ko",
-  "zh-cn",
-  "zh-tw",
-];
 
 let currentScheme: ColorScheme = defaultSettings.colorScheme;
 let currentMode: ColorMode = defaultSettings.colorMode;
@@ -293,117 +276,17 @@ const pickers = mountOptionsPickers(pickersRoot, {
   ...pickerHandlers,
 });
 
-const autoToggle = createBooleanToggleController({
-  root: autoToggleRoot,
-  id: "options-auto",
-  label: "Auto-summarize when panel is open",
-  getValue: () => autoValue,
-  setValue: (checked) => {
-    autoValue = checked;
-  },
-  scheduleAutoSave,
-});
-
-const chatToggle = createBooleanToggleController({
-  root: chatToggleRoot,
-  id: "options-chat",
-  label: "Enable Chat mode in the side panel",
-  getValue: () => chatEnabledValue,
-  setValue: (checked) => {
-    chatEnabledValue = checked;
-  },
-  scheduleAutoSave,
-});
-
 const automationPermissions = createAutomationPermissionsController({
   automationPermissionsBtn,
   userScriptsNoticeEl,
-  getAutomationEnabled: () => automationEnabledValue,
+  getAutomationEnabled: () => booleanSettings.getState().automationEnabled,
   flashStatus,
-});
-
-const automationToggle = createBooleanToggleController({
-  root: automationToggleRoot,
-  id: "options-automation",
-  label: "Enable website automation",
-  getValue: () => automationEnabledValue,
-  setValue: (checked) => {
-    automationEnabledValue = checked;
-  },
-  scheduleAutoSave,
-  afterChange: automationPermissions.updateUi,
 });
 
 automationPermissionsBtn.addEventListener("click", () => {
   void automationPermissions.requestPermissions();
 });
 skillsController.bind();
-
-const hoverSummariesToggle = createBooleanToggleController({
-  root: hoverSummariesToggleRoot,
-  id: "options-hover-summaries",
-  label: "Hover summaries (experimental)",
-  getValue: () => hoverSummariesValue,
-  setValue: (checked) => {
-    hoverSummariesValue = checked;
-  },
-  scheduleAutoSave,
-});
-
-const summaryTimestampsToggle = createBooleanToggleController({
-  root: summaryTimestampsToggleRoot,
-  id: "options-summary-timestamps",
-  label: "Summary timestamps (media only)",
-  getValue: () => summaryTimestampsValue,
-  setValue: (checked) => {
-    summaryTimestampsValue = checked;
-  },
-  scheduleAutoSave,
-});
-
-const slidesParallelToggle = createBooleanToggleController({
-  root: slidesParallelToggleRoot,
-  id: "options-slides-parallel",
-  label: "Show summary first (parallel slides)",
-  getValue: () => slidesParallelValue,
-  setValue: (checked) => {
-    slidesParallelValue = checked;
-  },
-  scheduleAutoSave,
-});
-
-const slidesOcrToggle = createBooleanToggleController({
-  root: slidesOcrToggleRoot,
-  id: "options-slides-ocr",
-  label: "Enable OCR slide text",
-  getValue: () => slidesOcrEnabledValue,
-  setValue: (checked) => {
-    slidesOcrEnabledValue = checked;
-  },
-  scheduleAutoSave,
-});
-
-const extendedLoggingToggle = createBooleanToggleController({
-  root: extendedLoggingToggleRoot,
-  id: "options-extended-logging",
-  label: "Extended logging (send full input/output to daemon logs)",
-  getValue: () => extendedLoggingValue,
-  setValue: (checked) => {
-    extendedLoggingValue = checked;
-  },
-  scheduleAutoSave,
-});
-
-const autoCliFallbackToggle = createBooleanToggleController({
-  root: autoCliFallbackToggleRoot,
-  id: "options-auto-cli-fallback",
-  label: "Auto CLI fallback for Auto model",
-  getValue: () => autoCliFallbackValue,
-  setValue: (checked) => {
-    autoCliFallbackValue = checked;
-  },
-  scheduleAutoSave,
-});
 
 async function load() {
   const s = await loadSettings();
@@ -416,24 +299,8 @@ async function load() {
     languagePresets,
     elements: settingsElements,
   });
-  autoValue = loadedState.booleans.autoSummarize;
-  chatEnabledValue = loadedState.booleans.chatEnabled;
-  automationEnabledValue = loadedState.booleans.automationEnabled;
-  hoverSummariesValue = loadedState.booleans.hoverSummaries;
-  summaryTimestampsValue = loadedState.booleans.summaryTimestamps;
-  slidesParallelValue = loadedState.booleans.slidesParallel;
-  slidesOcrEnabledValue = loadedState.booleans.slidesOcrEnabled;
-  extendedLoggingValue = loadedState.booleans.extendedLogging;
-  autoCliFallbackValue = loadedState.booleans.autoCliFallback;
-  autoToggle.render();
-  chatToggle.render();
-  automationToggle.render();
-  hoverSummariesToggle.render();
-  summaryTimestampsToggle.render();
-  slidesParallelToggle.render();
-  slidesOcrToggle.render();
-  extendedLoggingToggle.render();
-  autoCliFallbackToggle.render();
+  booleanSettings.setState(loadedState.booleans);
+  booleanSettings.render();
   currentScheme = loadedState.colorScheme;
   currentMode = loadedState.colorMode;
   pickers.update({ scheme: currentScheme, mode: currentMode, ...pickerHandlers });

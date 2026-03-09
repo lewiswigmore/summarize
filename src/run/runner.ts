@@ -17,7 +17,6 @@ import {
 import { parseCliProviderArg } from "./env.js";
 import { handleFileInput, isTranscribableExtension, withUrlAsset } from "./flows/asset/input.js";
 import { summarizeMediaFile as summarizeMediaFileImpl } from "./flows/asset/media.js";
-import { summarizeAsset as summarizeAssetFlow } from "./flows/asset/summary.js";
 import { runUrlFlow } from "./flows/url/flow.js";
 import { attachRichHelp, buildProgram } from "./help.js";
 import { createMediaCacheFromConfig } from "./media-cache-state.js";
@@ -456,77 +455,7 @@ export async function runCli(
       stderr.write(`${themeForStderr.dim(`via ${filtered.join(", ")}`)}\n`);
       restoreProgressAfterStdout?.();
     };
-    const assetSummaryContext = {
-      env,
-      envForRun,
-      stdout,
-      stderr,
-      execFileImpl,
-      timeoutMs,
-      preprocessMode,
-      format,
-      extractMode,
-      lengthArg,
-      forceSummary,
-      outputLanguage,
-      videoMode,
-      fixedModelSpec,
-      promptOverride,
-      lengthInstruction,
-      languageInstruction,
-      isFallbackModel,
-      isImplicitAutoSelection,
-      allowAutoCliFallback: false,
-      desiredOutputTokens,
-      envForAuto,
-      configForModelSelection,
-      cliAvailability,
-      requestedModel,
-      requestedModelInput,
-      requestedModelLabel,
-      wantsFreeNamedModel,
-      isNamedModelSelection,
-      maxOutputTokensArg,
-      json,
-      metricsEnabled,
-      metricsDetailed,
-      shouldComputeReport,
-      runStartedAtMs,
-      verbose,
-      verboseColor,
-      streamingEnabled,
-      plain,
-      summaryEngine,
-      trackedFetch,
-      writeViaFooter,
-      clearProgressForStdout,
-      restoreProgressAfterStdout,
-      getLiteLlmCatalog,
-      buildReport,
-      estimateCostUsd,
-      llmCalls,
-      cache: cacheState,
-      summaryCacheBypass: noCacheFlag,
-      mediaCache,
-      apiStatus: {
-        xaiApiKey,
-        apiKey,
-        openrouterApiKey,
-        apifyToken,
-        firecrawlConfigured,
-        googleConfigured,
-        anthropicConfigured,
-        providerBaseUrls,
-        zaiApiKey,
-        zaiBaseUrl,
-        nvidiaApiKey,
-        nvidiaBaseUrl,
-        assemblyaiApiKey,
-      },
-    };
-
     const { summarizeAsset, assetInputContext, urlFlowContext } = createRunnerFlowContexts({
-      assetSummaryContext,
       summarizeMediaFileImpl,
       cacheState,
       mediaCache,

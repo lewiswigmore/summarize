@@ -1,14 +1,15 @@
-import {
-  formatCompactCount,
-  formatDurationSecondsSmart,
-  formatElapsedMs,
-  formatMinutesSmart,
-} from "../tty/format.js";
+import { formatCompactCount, formatElapsedMs } from "../tty/format.js";
 import {
   createThemeRenderer,
   resolveThemeNameFromSources,
   resolveTrueColor,
 } from "../tty/theme.js";
+export {
+  buildExtractFinishLabel,
+  buildSummaryFinishLabel,
+  type ExtractDiagnosticsForFinishLine,
+} from "./finish-line-labels.js";
+export { buildLengthPartsForFinishLine, type ExtractedForLengths } from "./finish-line-lengths.js";
 import { formatUSD, sumNumbersOrNull } from "./format.js";
 
 export type FinishLineText = {
@@ -19,29 +20,6 @@ export type FinishLineText = {
 export type FinishLineModel = {
   lineParts: string[];
   detailParts: string[];
-};
-
-export type ExtractDiagnosticsForFinishLine = {
-  strategy: "bird" | "xurl" | "firecrawl" | "html" | "nitter";
-  firecrawl: { used: boolean };
-  markdown: { used: boolean; provider: "firecrawl" | "llm" | null; notes?: string | null };
-  transcript: { textProvided: boolean; provider: string | null };
-};
-
-export type ExtractedForLengths = {
-  url: string;
-  siteName: string | null;
-  totalCharacters: number;
-  wordCount: number;
-  transcriptCharacters: number | null;
-  transcriptLines: number | null;
-  transcriptWordCount: number | null;
-  transcriptSource: string | null;
-  transcriptionProvider: string | null;
-  mediaDurationSeconds: number | null;
-  video: { kind: "youtube" | "direct"; url: string } | null;
-  isVideoOnly: boolean;
-  diagnostics: { transcript: { cacheStatus: string } };
 };
 
 export function formatModelLabelForDisplay(model: string): string {
@@ -57,130 +35,6 @@ export function formatModelLabelForDisplay(model: string): string {
   }
 
   return trimmed;
-}
-
-function inferMediaKindLabelForFinishLine(
-  extracted: ExtractedForLengths,
-): "audio" | "video" | null {
-  if (extracted.siteName === "YouTube" || /youtube\.com|youtu\.be/i.test(extracted.url)) {
-    return "video";
-  }
-  if (extracted.isVideoOnly || extracted.video) {
-    return "video";
-  }
-
-  // For everything else with a transcript, default to audio. This covers podcasts and direct audio files.
-  const hasTranscript =
-    typeof extracted.transcriptCharacters === "number" && extracted.transcriptCharacters > 0;
-  if (!hasTranscript) return null;
-  return "audio";
-}
-
-function buildCompactTranscriptPart(extracted: ExtractedForLengths): string | null {
-  const isYouTube =
-    extracted.siteName === "YouTube" || /youtube\.com|youtu\.be/i.test(extracted.url);
-  if (!isYouTube && !extracted.transcriptCharacters) return null;
-
-  const transcriptChars = extracted.transcriptCharacters;
-  if (typeof transcriptChars !== "number" || transcriptChars <= 0) return null;
-
-  const wordEstimate = Math.max(0, Math.round(transcriptChars / 6));
-  const transcriptWords = extracted.transcriptWordCount ?? wordEstimate;
-  const minutesEstimate = Math.max(0.1, transcriptWords / 160);
-
-  const exactDurationSeconds =
-    typeof extracted.mediaDurationSeconds === "number" && extracted.mediaDurationSeconds > 0
-      ? extracted.mediaDurationSeconds
-      : null;
-  const duration =
-    exactDurationSeconds != null
-      ? formatDurationSecondsSmart(exactDurationSeconds)
-      : formatMinutesSmart(minutesEstimate);
-
-  const wordLabel = `${formatCompactCount(transcriptWords)} words`;
-
-  const mediaKind = inferMediaKindLabelForFinishLine(extracted);
-
-  const kindLabel = (() => {
-    if (isYouTube) return "YouTube";
-    if (mediaKind === "audio") return "podcast";
-    if (mediaKind === "video") return "video";
-    return null;
-  })();
-
-  return kindLabel ? `${duration} ${kindLabel} · ${wordLabel}` : `${duration} · ${wordLabel}`;
-}
-
-function buildDetailedLengthPartsForExtracted(extracted: ExtractedForLengths): string[] {
-  const parts: string[] = [];
-
-  const isYouTube =
-    extracted.siteName === "YouTube" || /youtube\.com|youtu\.be/i.test(extracted.url);
-  if (!isYouTube && !extracted.transcriptCharacters) return parts;
-
-  const transcriptChars = extracted.transcriptCharacters;
-  const shouldOmitInput =
-    typeof transcriptChars === "number" &&
-    transcriptChars > 0 &&
-    extracted.totalCharacters > 0 &&
-    transcriptChars / extracted.totalCharacters >= 0.95;
-  if (!shouldOmitInput) {
-    parts.push(
-      `input=${formatCompactCount(extracted.totalCharacters)} chars (~${formatCompactCount(extracted.wordCount)} words)`,
-    );
-  }
-
-  if (typeof extracted.transcriptCharacters === "number" && extracted.transcriptCharacters > 0) {
-    // Transcript stats:
-    // - `transcriptWordCount`: exact-ish (derived from transcript text after truncation budgeting)
-    // - `mediaDurationSeconds`: best-effort, sourced from provider metadata (e.g. RSS itunes:duration)
-    const wordEstimate = Math.max(0, Math.round(extracted.transcriptCharacters / 6));
-    const transcriptWords = extracted.transcriptWordCount ?? wordEstimate;
-    const minutesEstimate = Math.max(0.1, transcriptWords / 160);
-
-    const details: string[] = [
-      `~${formatCompactCount(transcriptWords)} words`,
-      `${formatCompactCount(extracted.transcriptCharacters)} chars`,
-    ];
-
-    const durationPart =
-      typeof extracted.mediaDurationSeconds === "number" && extracted.mediaDurationSeconds > 0
-        ? formatDurationSecondsSmart(extracted.mediaDurationSeconds)
-        : formatMinutesSmart(minutesEstimate);
-
-    parts.push(`transcript=${durationPart} (${details.join(" · ")})`);
-  }
-
-  const hasTranscript =
-    typeof extracted.transcriptCharacters === "number" && extracted.transcriptCharacters > 0;
-  if (hasTranscript && extracted.transcriptSource) {
-    const providerSuffix =
-      extracted.transcriptSource === "whisper" &&
-      extracted.transcriptionProvider &&
-      extracted.transcriptionProvider.trim().length > 0
-        ? `/${extracted.transcriptionProvider.trim()}`
-        : "";
-    const cacheStatus = extracted.diagnostics?.transcript?.cacheStatus;
-    const cachePart =
-      typeof cacheStatus === "string" && cacheStatus !== "unknown" ? cacheStatus : null;
-    const txParts: string[] = [`tx=${extracted.transcriptSource}${providerSuffix}`];
-    if (cachePart) txParts.push(`cache=${cachePart}`);
-    parts.push(txParts.join(" "));
-  }
-  return parts;
-}
-
-export function buildLengthPartsForFinishLine(
-  extracted: ExtractedForLengths,
-  detailed: boolean,
-): string[] | null {
-  const compactTranscript = buildCompactTranscriptPart(extracted);
-  if (!detailed) return compactTranscript ? [`txc=${compactTranscript}`] : null;
-
-  const parts = buildDetailedLengthPartsForExtracted(extracted);
-  if (parts.length === 0 && !compactTranscript) return null;
-  if (compactTranscript) parts.unshift(`txc=${compactTranscript}`);
-  return parts;
 }
 
 export function writeFinishLine({
@@ -454,84 +308,4 @@ export function buildFinishLineModel({
   }
 
   return { lineParts, detailParts: line2Segments };
-}
-
-export function buildExtractFinishLabel(args: {
-  extracted: { diagnostics: ExtractDiagnosticsForFinishLine };
-  format: "text" | "markdown";
-  markdownMode: "off" | "auto" | "llm" | "readability";
-  hasMarkdownLlmCall: boolean;
-}): string {
-  const base = args.format === "markdown" ? "markdown" : "text";
-
-  const transcriptProvided = Boolean(args.extracted.diagnostics.transcript?.textProvided);
-  if (transcriptProvided) {
-    const provider = args.extracted.diagnostics.transcript?.provider;
-    return provider ? `${base} via transcript/${provider}` : `${base} via transcript`;
-  }
-
-  if (args.format === "markdown") {
-    const strategy = String(args.extracted.diagnostics.strategy ?? "");
-    const firecrawlUsed =
-      strategy === "firecrawl" || Boolean(args.extracted.diagnostics.firecrawl?.used);
-    if (firecrawlUsed) return `${base} via firecrawl`;
-    if (strategy === "html" && args.markdownMode === "readability")
-      return `${base} via readability`;
-
-    const mdUsed = Boolean(args.extracted.diagnostics.markdown?.used);
-    const mdProvider = args.extracted.diagnostics.markdown.provider;
-    const mdNotes = args.extracted.diagnostics.markdown.notes ?? null;
-
-    if (mdUsed && mdProvider === "firecrawl") {
-      return `${base} via firecrawl`;
-    }
-
-    if (mdUsed && mdNotes && mdNotes.toLowerCase().includes("readability html used")) {
-      return `${base} via readability`;
-    }
-
-    if (mdUsed) {
-      if (args.markdownMode === "readability") return `${base} via readability`;
-      if (args.hasMarkdownLlmCall) return `${base} via llm`;
-      return `${base} via markitdown`;
-    }
-  }
-
-  const strategy = String(args.extracted.diagnostics.strategy ?? "");
-  if (strategy === "firecrawl" || args.extracted.diagnostics.firecrawl?.used) {
-    return `${base} via firecrawl`;
-  }
-  if (strategy === "xurl") return `${base} via xurl`;
-  if (strategy === "bird") return `${base} via bird`;
-  if (strategy === "nitter") return `${base} via nitter`;
-
-  // Default: avoid noisy "via html"
-  return base;
-}
-
-export function buildSummaryFinishLabel(args: {
-  extracted: { diagnostics: ExtractDiagnosticsForFinishLine; wordCount: number };
-}): string | null {
-  const strategy = String(args.extracted.diagnostics.strategy ?? "");
-  const sources: string[] = [];
-  if (strategy === "xurl") sources.push("xurl");
-  if (strategy === "bird") sources.push("bird");
-  if (strategy === "nitter") sources.push("nitter");
-  if (strategy === "firecrawl" || args.extracted.diagnostics.firecrawl?.used) {
-    sources.push("firecrawl");
-  }
-  const transcriptProvided = Boolean(args.extracted.diagnostics.transcript?.textProvided);
-  const words =
-    typeof args.extracted.wordCount === "number" && Number.isFinite(args.extracted.wordCount)
-      ? args.extracted.wordCount
-      : 0;
-  const wordLabel = words > 0 ? `${formatCompactCount(words)} words` : null;
-  if (transcriptProvided) {
-    if (sources.length === 0) return null;
-    return `via ${sources.join("+")}`;
-  }
-  if (sources.length === 0 && !wordLabel) return null;
-  if (wordLabel && sources.length > 0) return `${wordLabel} via ${sources.join("+")}`;
-  if (wordLabel) return wordLabel;
-  return `via ${sources.join("+")}`;
 }

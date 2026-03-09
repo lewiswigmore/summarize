@@ -1,9 +1,35 @@
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, sep as pathSep, resolve as resolvePath } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import {
+  buildExtractCacheKeyValue,
+  buildLanguageKey,
+  buildLengthKey,
+  buildPromptContentHash,
+  buildPromptHash,
+  buildSlidesCacheKeyValue,
+  buildSummaryCacheKeyValue,
+  buildTranscriptCacheKeyValue,
+  hashJson,
+  hashString,
+  normalizeContentForHash,
+  extractTaggedBlock,
+} from "./cache-keys.js";
+export {
+  buildExtractCacheKeyValue,
+  buildLanguageKey,
+  buildLengthKey,
+  buildPromptContentHash,
+  buildPromptHash,
+  buildSlidesCacheKeyValue,
+  buildSummaryCacheKeyValue,
+  buildTranscriptCacheKeyValue,
+  hashJson,
+  hashString,
+  normalizeContentForHash,
+  extractTaggedBlock,
+} from "./cache-keys.js";
+import { cleanupSlidesPayload } from "./cache-slides-cleanup.js";
 import type { TranscriptCache, TranscriptSource } from "./content/index.js";
-import type { LengthArg } from "./flags.js";
-import type { OutputLanguage } from "./language.js";
 
 export type CacheKind = "extract" | "summary" | "transcript" | "chat" | "slides";
 
@@ -124,44 +150,6 @@ function ensureDir(path: string) {
 function resolveHomeDir(env: Record<string, string | undefined>): string | null {
   const home = env.HOME?.trim() || env.USERPROFILE?.trim();
   return home || null;
-}
-
-function normalizeAbsolutePath(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const resolved = resolvePath(trimmed);
-  return isAbsolute(resolved) ? resolved : null;
-}
-
-function cleanupSlidesPayload(raw: string) {
-  let payload: unknown;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (!payload || typeof payload !== "object") return;
-  const slidesDir = normalizeAbsolutePath((payload as { slidesDir?: unknown }).slidesDir);
-  const slides = Array.isArray((payload as { slides?: unknown }).slides)
-    ? ((payload as { slides?: unknown }).slides as Array<{ imagePath?: unknown }>)
-    : [];
-  if (!slidesDir) return;
-  const dirPrefix = slidesDir.endsWith(pathSep) ? slidesDir : `${slidesDir}${pathSep}`;
-  const safeRemove = (target: string) => {
-    try {
-      rmSync(target, { force: true });
-    } catch {
-      // ignore
-    }
-  };
-  for (const slide of slides) {
-    const imagePath = normalizeAbsolutePath(slide?.imagePath);
-    if (!imagePath) continue;
-    if (!imagePath.startsWith(dirPrefix)) continue;
-    safeRemove(imagePath);
-  }
-  safeRemove(join(slidesDir, "slides.json"));
 }
 
 export function resolveCachePath({
@@ -402,55 +390,6 @@ export function clearCacheFiles(path: string) {
   rmSync(`${path}-shm`, { force: true });
 }
 
-export function hashString(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-export function hashJson(value: unknown): string {
-  return hashString(JSON.stringify(value));
-}
-
-export function normalizeContentForHash(content: string): string {
-  return content.replaceAll("\r\n", "\n").trim();
-}
-
-export function extractTaggedBlock(prompt: string, tag: "instructions" | "content"): string | null {
-  const open = `<${tag}>`;
-  const close = `</${tag}>`;
-  const start = prompt.indexOf(open);
-  if (start === -1) return null;
-  const end = prompt.indexOf(close, start + open.length);
-  if (end === -1) return null;
-  return prompt.slice(start + open.length, end).trim();
-}
-
-export function buildPromptHash(prompt: string): string {
-  const instructions = extractTaggedBlock(prompt, "instructions") ?? prompt;
-  return hashString(instructions.trim());
-}
-
-export function buildPromptContentHash({
-  prompt,
-  fallbackContent,
-}: {
-  prompt: string;
-  fallbackContent?: string | null;
-}): string | null {
-  const content = extractTaggedBlock(prompt, "content") ?? fallbackContent ?? null;
-  if (!content || content.trim().length === 0) return null;
-  return hashString(normalizeContentForHash(content));
-}
-
-export function buildLengthKey(lengthArg: LengthArg): string {
-  return lengthArg.kind === "preset"
-    ? `preset:${lengthArg.preset}`
-    : `chars:${lengthArg.maxCharacters}`;
-}
-
-export function buildLanguageKey(outputLanguage: OutputLanguage): string {
-  return outputLanguage.kind === "auto" ? "auto" : outputLanguage.tag;
-}
-
 export function buildExtractCacheKey({
   url,
   options,
@@ -458,7 +397,11 @@ export function buildExtractCacheKey({
   url: string;
   options: Record<string, unknown>;
 }): string {
-  return hashJson({ url, options, formatVersion: CACHE_FORMAT_VERSION });
+  return buildExtractCacheKeyValue({
+    url,
+    options,
+    formatVersion: CACHE_FORMAT_VERSION,
+  });
 }
 
 export function buildSummaryCacheKey({
@@ -474,7 +417,7 @@ export function buildSummaryCacheKey({
   lengthKey: string;
   languageKey: string;
 }): string {
-  return hashJson({
+  return buildSummaryCacheKeyValue({
     contentHash,
     promptHash,
     model,
@@ -498,16 +441,9 @@ export function buildSlidesCacheKey({
     minDurationSeconds: number;
   };
 }): string {
-  return hashJson({
+  return buildSlidesCacheKeyValue({
     url,
-    settings: {
-      ocr: settings.ocr,
-      outputDir: settings.outputDir,
-      sceneThreshold: settings.sceneThreshold,
-      autoTuneThreshold: settings.autoTuneThreshold,
-      maxSlides: settings.maxSlides,
-      minDurationSeconds: settings.minDurationSeconds,
-    },
+    settings,
     formatVersion: CACHE_FORMAT_VERSION,
   });
 }
@@ -523,10 +459,10 @@ export function buildTranscriptCacheKey({
   formatVersion?: number;
   fileMtime?: number | null;
 }): string {
-  return hashJson({
+  return buildTranscriptCacheKeyValue({
     url,
     namespace,
-    fileMtime: fileMtime ?? null,
+    fileMtime,
     formatVersion: formatVersion ?? CACHE_FORMAT_VERSION,
   });
 }

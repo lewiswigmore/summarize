@@ -10,6 +10,15 @@ import {
   formatBytes,
   resolveYoutubeStreamUrl,
 } from "./download.js";
+import {
+  buildSlideTimeline,
+  buildSlidesChunkMeta,
+  emitFinalSlides,
+  emitPlaceholderSlides,
+  renameSlidesWithTimestamps,
+  SLIDES_PROGRESS,
+  writeSlidesJson,
+} from "./extract-finalize.js";
 import { detectSlideTimestamps, extractFramesAtTimestamps } from "./frame-extraction.js";
 import { prepareSlidesInput } from "./ingest.js";
 import { runOcrOnSlides } from "./ocr.js";
@@ -280,20 +289,12 @@ export async function extractSlidesForSource({
         tesseractPath ?? resolveToolPath("tesseract", env, "TESSERACT_PATH"),
       );
 
-      const P_PREPARE = 2;
-      const P_FETCH_VIDEO = 6;
-      const P_DOWNLOAD_VIDEO = 35;
-      const P_DETECT_SCENES = 60;
-      const P_EXTRACT_FRAMES = 90;
-      const P_OCR = 99;
-      const P_FINAL = 100;
-
       {
         const prepareStartedAt = Date.now();
         await prepareSlidesDir(slidesDir);
         logSlidesTiming("prepare output dir", prepareStartedAt);
       }
-      reportSlidesProgress?.("preparing source", P_PREPARE);
+      reportSlidesProgress?.("preparing source", SLIDES_PROGRESS.PREPARE);
 
       const {
         inputPath,
@@ -319,7 +320,7 @@ export async function extractSlidesForSource({
 
       try {
         const ffmpegStartedAt = Date.now();
-        reportSlidesProgress?.("detecting scenes", P_FETCH_VIDEO + 2);
+        reportSlidesProgress?.("detecting scenes", SLIDES_PROGRESS.FETCH_VIDEO + 2);
         const detection = await detectSlideTimestamps({
           ffmpegPath: ffmpegBinary,
           ffprobePath: ffprobeBinary,
@@ -333,7 +334,10 @@ export async function extractSlidesForSource({
           sampleCount: resolveSlidesSampleCount(env),
           onSegmentProgress: (completed, total) => {
             const ratio = total > 0 ? completed / total : 0;
-            const mapped = P_FETCH_VIDEO + 2 + ratio * (P_DETECT_SCENES - (P_FETCH_VIDEO + 2));
+            const mapped =
+              SLIDES_PROGRESS.FETCH_VIDEO +
+              2 +
+              ratio * (SLIDES_PROGRESS.DETECT_SCENES - (SLIDES_PROGRESS.FETCH_VIDEO + 2));
             reportSlidesProgress?.(
               "detecting scenes",
               mapped,
@@ -343,7 +347,7 @@ export async function extractSlidesForSource({
           logSlides,
           logSlidesTiming,
         });
-        reportSlidesProgress?.("detecting scenes", P_DETECT_SCENES);
+        reportSlidesProgress?.("detecting scenes", SLIDES_PROGRESS.DETECT_SCENES);
         logSlidesTiming("ffmpeg scene-detect", ffmpegStartedAt);
 
         const interval = buildIntervalTimestamps({
@@ -382,12 +386,10 @@ export async function extractSlidesForSource({
           },
         );
 
-        const timelineSlides: SlideExtractionResult = {
-          sourceUrl: source.url,
-          sourceKind: source.kind,
-          sourceId: source.sourceId,
+        const chunkMeta = buildSlidesChunkMeta({ slidesDir, source, ocrAvailable });
+        const timelineSlides = buildSlideTimeline({
+          source,
           slidesDir,
-          slidesDirId: buildSlidesDirId(slidesDir),
           sceneThreshold: settings.sceneThreshold,
           autoTuneThreshold: settings.autoTuneThreshold,
           autoTune: detection.autoTune,
@@ -395,25 +397,17 @@ export async function extractSlidesForSource({
           minSlideDuration: settings.minDurationSeconds,
           ocrRequested: settings.ocr,
           ocrAvailable,
-          slides: trimmed.map(({ segment: _segment, ...slide }) => slide),
           warnings,
-        };
+          slides: trimmed,
+        });
         hooks?.onSlidesTimeline?.(timelineSlides);
 
         // Emit placeholders immediately so the UI can render the slide list while frames are still extracting.
-        if (hooks?.onSlideChunk) {
-          const meta = {
-            slidesDir,
-            sourceUrl: source.url,
-            sourceId: source.sourceId,
-            sourceKind: source.kind,
-            ocrAvailable,
-          };
-          for (const slide of trimmed) {
-            const { segment: _segment, ...payload } = slide;
-            hooks.onSlideChunk({ slide: { ...payload, imagePath: "" }, meta });
-          }
-        }
+        emitPlaceholderSlides({
+          slides: trimmed,
+          meta: chunkMeta,
+          onSlideChunk: hooks?.onSlideChunk,
+        });
 
         const formatProgressCount = (completed: number, total: number) =>
           total > 0 ? `(${completed}/${total})` : "";
@@ -421,7 +415,8 @@ export async function extractSlidesForSource({
           const ratio = total > 0 ? completed / total : 0;
           reportSlidesProgress?.(
             "extracting frames",
-            P_DETECT_SCENES + ratio * (P_EXTRACT_FRAMES - P_DETECT_SCENES),
+            SLIDES_PROGRESS.DETECT_SCENES +
+              ratio * (SLIDES_PROGRESS.EXTRACT_FRAMES - SLIDES_PROGRESS.DETECT_SCENES),
             formatProgressCount(completed, total),
           );
         };
@@ -444,13 +439,7 @@ export async function extractSlidesForSource({
               ? (slide) =>
                   onSlideChunk({
                     slide,
-                    meta: {
-                      slidesDir,
-                      sourceUrl: source.url,
-                      sourceId: source.sourceId,
-                      sourceKind: source.kind,
-                      ocrAvailable,
-                    },
+                    meta: chunkMeta,
                   })
               : null,
             logSlides,
@@ -488,12 +477,12 @@ export async function extractSlidesForSource({
         if (ocrEnabled && tesseractPath) {
           const ocrStartedAt = Date.now();
           logSlides?.(`ocr start count=${renamedSlides.length} mode=parallel workers=${workers}`);
-          const ocrStartPercent = P_OCR - 3;
+          const ocrStartPercent = SLIDES_PROGRESS.OCR - 3;
           const reportOcrProgress = (completed: number, total: number) => {
             const ratio = total > 0 ? completed / total : 0;
             reportSlidesProgress?.(
               "running OCR",
-              ocrStartPercent + ratio * (P_OCR - ocrStartPercent),
+              ocrStartPercent + ratio * (SLIDES_PROGRESS.OCR - ocrStartPercent),
               formatProgressCount(completed, total),
             );
           };
@@ -510,29 +499,15 @@ export async function extractSlidesForSource({
           }
         }
 
-        reportSlidesProgress?.("finalizing", P_FINAL - 1);
-
-        if (hooks?.onSlideChunk) {
-          for (const slide of slidesWithOcr) {
-            hooks.onSlideChunk({
-              slide,
-              meta: {
-                slidesDir,
-                sourceUrl: source.url,
-                sourceId: source.sourceId,
-                sourceKind: source.kind,
-                ocrAvailable,
-              },
-            });
-          }
-        }
-
-        const result: SlideExtractionResult = {
-          sourceUrl: source.url,
-          sourceKind: source.kind,
-          sourceId: source.sourceId,
+        reportSlidesProgress?.("finalizing", SLIDES_PROGRESS.FINAL - 1);
+        emitFinalSlides({
+          slides: slidesWithOcr,
+          meta: chunkMeta,
+          onSlideChunk: hooks?.onSlideChunk,
+        });
+        const result = buildSlideTimeline({
+          source,
           slidesDir,
-          slidesDirId: buildSlidesDirId(slidesDir),
           sceneThreshold: settings.sceneThreshold,
           autoTuneThreshold: settings.autoTuneThreshold,
           autoTune: detection.autoTune,
@@ -540,12 +515,12 @@ export async function extractSlidesForSource({
           minSlideDuration: settings.minDurationSeconds,
           ocrRequested: settings.ocr,
           ocrAvailable,
-          slides: slidesWithOcr,
           warnings,
-        };
+          slides: slidesWithOcr,
+        });
 
         await writeSlidesJson(result, slidesDir);
-        reportSlidesProgress?.("finalizing", P_FINAL);
+        reportSlidesProgress?.("finalizing", SLIDES_PROGRESS.FINAL);
         logSlidesTiming("slides total", totalStartedAt);
         return result;
       } finally {
@@ -575,26 +550,6 @@ async function prepareSlidesDir(slidesDir: string): Promise<void> {
   );
 }
 
-async function renameSlidesWithTimestamps(
-  slides: SlideImage[],
-  slidesDir: string,
-): Promise<SlideImage[]> {
-  const renamed: SlideImage[] = [];
-  for (const slide of slides) {
-    const timestampLabel = slide.timestamp.toFixed(2);
-    const filename = `slide_${slide.index.toString().padStart(4, "0")}_${timestampLabel}s.png`;
-    const nextPath = path.join(slidesDir, filename);
-    if (slide.imagePath !== nextPath) {
-      await fs.rename(slide.imagePath, nextPath).catch(async () => {
-        await fs.copyFile(slide.imagePath, nextPath);
-        await fs.rm(slide.imagePath, { force: true });
-      });
-    }
-    renamed.push({ ...slide, imagePath: nextPath });
-  }
-  return renamed;
-}
-
 async function withSlidesLock<T>(
   key: string,
   fn: () => Promise<T>,
@@ -616,29 +571,4 @@ async function withSlidesLock<T>(
       slidesLocks.delete(key);
     }
   }
-}
-
-async function writeSlidesJson(result: SlideExtractionResult, slidesDir: string): Promise<void> {
-  const slidesDirId = result.slidesDirId ?? buildSlidesDirId(slidesDir);
-  const payload = {
-    sourceUrl: result.sourceUrl,
-    sourceKind: result.sourceKind,
-    sourceId: result.sourceId,
-    slidesDir,
-    slidesDirId,
-    sceneThreshold: result.sceneThreshold,
-    autoTuneThreshold: result.autoTuneThreshold,
-    autoTune: result.autoTune,
-    maxSlides: result.maxSlides,
-    minSlideDuration: result.minSlideDuration,
-    ocrRequested: result.ocrRequested,
-    ocrAvailable: result.ocrAvailable,
-    slideCount: result.slides.length,
-    warnings: result.warnings,
-    slides: result.slides.map((slide) => ({
-      ...slide,
-      imagePath: serializeSlideImagePath(slidesDir, slide.imagePath),
-    })),
-  };
-  await fs.writeFile(path.join(slidesDir, "slides.json"), JSON.stringify(payload, null, 2), "utf8");
 }
