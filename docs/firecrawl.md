@@ -12,7 +12,8 @@ Firecrawl is a fallback for sites that block direct HTML fetching or don’t ren
 
 - `off`: never use Firecrawl.
 - `auto` (default): use Firecrawl only when HTML extraction looks blocked/thin.
-- `always`: try Firecrawl first (falls back to HTML if Firecrawl is unavailable/empty).
+- `always`: try Firecrawl first for non-YouTube URLs (falls back to HTML if Firecrawl is unavailable/empty).
+  - YouTube URLs reject `--firecrawl always`; use `--youtube auto|web|yt-dlp|apify` instead.
 
 ## Extract default
 

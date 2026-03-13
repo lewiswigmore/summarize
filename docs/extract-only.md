@@ -24,7 +24,7 @@ Deprecated alias: `--extract-only`.
 - For non-YouTube URLs with `--format md`, the CLI uses Readability article HTML as the default Markdown input (`--markdown-mode readability`).
   - Use `--markdown-mode auto` to prefer LLM/markitdown conversion without Readability preprocessing.
   - Use `--markdown-mode llm` to force an LLM conversion.
-  - Use `--firecrawl always` to try Firecrawl first.
+  - Use `--firecrawl always` to try Firecrawl first for non-YouTube URLs.
 - For non-YouTube URLs with `--format md`, `--markdown-mode auto` can convert HTML to Markdown via an LLM when configured.
   - Force it with `--markdown-mode llm`.
   - If no LLM is configured, `--markdown-mode auto` may fall back to `uvx markitdown` when available.

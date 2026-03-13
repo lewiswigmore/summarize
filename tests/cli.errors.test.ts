@@ -53,6 +53,22 @@ describe("cli error handling", () => {
     ).rejects.toThrow("--firecrawl always requires FIRECRAWL_API_KEY");
   });
 
+  it("errors when --firecrawl always is set for a YouTube URL", async () => {
+    await expect(
+      runCli(
+        ["--firecrawl", "always", "--extract", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+        {
+          env: { HOME: home, FIRECRAWL_API_KEY: "fc-test" },
+          fetch: vi.fn() as unknown as typeof fetch,
+          stdout: noopStream(),
+          stderr: noopStream(),
+        },
+      ),
+    ).rejects.toThrow(
+      "--firecrawl always is not supported for YouTube URLs; use --youtube auto|web|yt-dlp|apify instead",
+    );
+  });
+
   it("errors when --markdown llm is set without any LLM keys", async () => {
     await expect(
       runCli(["--format", "md", "--markdown-mode", "llm", "--extract", "https://example.com"], {

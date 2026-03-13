@@ -63,6 +63,11 @@ export async function runUrlFlow({
   });
 
   const markdown = createMarkdownConverters(ctx, { isYoutubeUrl });
+  if (flags.firecrawlMode === "always" && isYoutubeUrl) {
+    throw new Error(
+      "--firecrawl always is not supported for YouTube URLs; use --youtube auto|web|yt-dlp|apify instead",
+    );
+  }
   if (flags.firecrawlMode === "always" && !model.apiStatus.firecrawlConfigured) {
     throw new Error("--firecrawl always requires FIRECRAWL_API_KEY");
   }

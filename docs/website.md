@@ -13,10 +13,11 @@ Use this for non-YouTube URLs.
 - Fetches the page HTML.
 - Extracts “article-ish” content and normalizes it into clean text.
 - If extraction looks blocked or too thin, it can retry via Firecrawl (Markdown).
+  - Firecrawl applies to non-YouTube URLs only; YouTube URLs use the `--youtube` transcript path instead.
 - If a page is effectively “video-only”, it may treat it as a video input (see `--video-mode`).
 - `--video-mode transcript` prefers embedded media transcripts on pages with audio/video (captions → yt-dlp/Whisper fallback).
 - With `--format md`, the CLI defaults to `--markdown-mode readability` (Readability article HTML as the Markdown input).
-  - Use `--firecrawl always` to try Firecrawl first.
+  - Use `--firecrawl always` to try Firecrawl first for non-YouTube URLs.
 - With `--format md`, `--markdown-mode auto|llm|readability` can also convert HTML → Markdown via an LLM using the configured `--model` (no provider fallback).
 - With `--format md`, `--markdown-mode auto` may fall back to `uvx markitdown` when available (disable with `--preprocess off`).
 - For podcast URLs (Apple Podcasts, RSS, Spotify episodes), it downloads the episode audio and transcribes via Whisper (prefers local `whisper.cpp` when installed + model available); progress shows “Downloading audio …” then “Transcribing …” (duration uses RSS hints or `ffprobe` when available).
